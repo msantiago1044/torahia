@@ -1,0 +1,16 @@
+# Add the 'together' package to your installation list
+RUN pip install --no-cache-dir \
+    groq \
+    edge-tts \
+    together \
+    moviepy==1.0.3 \
+groq
+edge-tts
+google-cloud-texttospeech
+google-cloud-aiplatform
+google-generativeai
+moviepy==1.0.3
+numpy<2.0.0
+imageio-ffmpeg
+pandas
+requests
