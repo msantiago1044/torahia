@@ -11,12 +11,12 @@ import asyncio
 import edge_tts
 from io import BytesIO
 from openai import OpenAI
-
 import numpy as np
 import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageFont
 import requests
+import base64
 
 # --- PARCHE DE COMPATIBILIDAD ---
 if not hasattr(PIL.Image, 'ANTIALIAS'):
@@ -30,31 +30,33 @@ with open('credentials.json', 'r', encoding='utf-8') as f:
     creds = json.load(f)
 
 # ------------------------------------------------------------
-# 1. CONFIGURACIÓN DE DEEPSEEK (texto)
+# 1. CONFIGURACIÓN DE ZHIPU AI / BIGMODEL (texto e imágenes)
 # ------------------------------------------------------------
-DEEPSEEK_API_KEY = creds.get("deepseek_api_key")
-if not DEEPSEEK_API_KEY:
-    raise ValueError("❌ Falta la API key de DeepSeek en credentials.json")
+ZHIPU_API_KEY = creds.get("zhipu_api_key")
+if not ZHIPU_API_KEY:
+    raise ValueError("❌ Falta la API key de Zhipu (zhipu_api_key) en credentials.json")
 
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-client_deepseek = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
-DEEPSEEK_CHAT_MODEL = "deepseek-chat"
+ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
+
+# Cliente compatible con OpenAI SDK para chat (guion + SEO)
+client_zhipu = OpenAI(api_key=ZHIPU_API_KEY, base_url=ZHIPU_BASE_URL)
+
+# Modelos de Zhipu/BigModel
+ZHIPU_CHAT_MODEL = "glm-4.6"          # Modelo de texto para guion y SEO
+ZHIPU_IMAGE_MODEL = "cogview-4-250304"  # Modelo de imágenes (CogView)
+
+# Endpoint directo de imágenes (la SDK de OpenAI no siempre expone bien
+# parámetros propios de Zhipu como "size", así que usamos requests directo)
+ZHIPU_IMAGES_URL = "https://open.bigmodel.cn/api/paas/v4/images/generations"
 
 # ------------------------------------------------------------
-# 2. CONFIGURACIÓN DE HUGGING FACE (imágenes con Janus-Pro-7B)
-# ------------------------------------------------------------
-HF_TOKEN = creds.get("hf_token")
-JANUS_API_URL = "https://api-inference.huggingface.co/models/deepseek-ai/Janus-Pro-7B"
-
-# ------------------------------------------------------------
-# 3. CONFIGURACIÓN GENERAL
+# 2. CONFIGURACIÓN GENERAL
 # ------------------------------------------------------------
 CARPETA_SALIDA_BASE = "PRODUCCION_TORAH"
 RUTA_OUTRO = "ASSETS/VIDEO/outro.mp4"
 ARCHIVO_MEMORIA = "memoria_progreso.json"
 AMAZON_LINK = "https://amzn.to/4qRzgBC"
 PATREON_LINK = "https://patreon.com/TorahDiaria"
-
 ORDEN_TORAH = ["Bereshit", "Shemot", "Vayikra", "Bamidbar", "Devarim"]
 
 DB_CONFIG = {
@@ -65,34 +67,36 @@ DB_CONFIG = {
 }
 
 # ------------------------------------------------------------
-# 4. FUNCIONES AUXILIARES DE DEEPSEEK (texto)
+# 3. FUNCIONES AUXILIARES DE ZHIPU (texto)
 # ------------------------------------------------------------
-def call_deepseek(prompt, temperature=0.7):
-    """Función genérica para consultar DeepSeek Chat."""
+def call_zhipu(prompt, temperature=0.7):
+    """Función genérica para consultar el modelo de chat de Zhipu (GLM)."""
     try:
-        response = client_deepseek.chat.completions.create(
-            model=DEEPSEEK_CHAT_MODEL,
+        response = client_zhipu.chat.completions.create(
+            model=ZHIPU_CHAT_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"❌ Error en llamada a DeepSeek: {e}")
+        print(f"❌ Error en llamada a Zhipu (chat): {e}")
         return None
 
+
 def limpiar_json(raw_text):
-    """Extrae JSON de la respuesta de DeepSeek (quita markdown)."""
+    """Extrae JSON de la respuesta de Zhipu (quita markdown)."""
     raw = (raw_text or "").replace("```json", "").replace("```", "").strip()
     return raw
 
 # ------------------------------------------------------------
-# 5. GESTIÓN DE MEMORIA Y BASE DE DATOS (sin cambios)
+# 4. GESTIÓN DE MEMORIA Y BASE DE DATOS (sin cambios)
 # ------------------------------------------------------------
 def gestionar_progreso():
     if not os.path.exists(ARCHIVO_MEMORIA):
         return {"ultimo_libro": "Bereshit", "ultimo_capitulo": 1, "ultimo_versiculo": 0}
     with open(ARCHIVO_MEMORIA, 'r', encoding='utf-8') as f:
         return json.load(f)
+
 
 def actualizar_memoria(libro, capitulo, versiculo_fin):
     print(f"💾 Guardando progreso: {libro} {capitulo}:{versiculo_fin}")
@@ -104,6 +108,7 @@ def actualizar_memoria(libro, capitulo, versiculo_fin):
     }
     with open(ARCHIVO_MEMORIA, 'w', encoding='utf-8') as f:
         json.dump(datos, f, indent=4, ensure_ascii=False)
+
 
 def obtener_texto_mysql(memoria):
     print("🔌 Consultando DB (Bloque de 10 versículos)...")
@@ -138,26 +143,26 @@ def obtener_texto_mysql(memoria):
             res_cap_sig = cursor.fetchall()
             resultados.extend(res_cap_sig)
 
-            if not resultados:
-                try:
-                    idx = ORDEN_TORAH.index(libro)
-                    if idx + 1 < len(ORDEN_TORAH):
-                        nuevo_libro = ORDEN_TORAH[idx + 1]
-                        print(f"🌟 ¡FIN DE LIBRO! Saltando automáticamente a {nuevo_libro}...")
-                        sql_book_sig = (
-                            "SELECT book_name_es, chapter, verse, spanish_text "
-                            "FROM torah_books "
-                            "WHERE book_name_es = %s AND chapter = 1 "
-                            "ORDER BY verse ASC LIMIT 10"
-                        )
-                        cursor.execute(sql_book_sig, (nuevo_libro,))
-                        resultados = cursor.fetchall()
-                    else:
-                        print("🏁 ¡Felicidades! Toda la Torah ha sido procesada.")
-                        exit()
-                except ValueError:
-                    print(f"❌ Error: Libro {libro} no está en ORDEN_TORAH.")
+        if not resultados:
+            try:
+                idx = ORDEN_TORAH.index(libro)
+                if idx + 1 < len(ORDEN_TORAH):
+                    nuevo_libro = ORDEN_TORAH[idx + 1]
+                    print(f"🌟 ¡FIN DE LIBRO! Saltando automáticamente a {nuevo_libro}...")
+                    sql_book_sig = (
+                        "SELECT book_name_es, chapter, verse, spanish_text "
+                        "FROM torah_books "
+                        "WHERE book_name_es = %s AND chapter = 1 "
+                        "ORDER BY verse ASC LIMIT 10"
+                    )
+                    cursor.execute(sql_book_sig, (nuevo_libro,))
+                    resultados = cursor.fetchall()
+                else:
+                    print("🏁 ¡Felicidades! Toda la Torah ha sido procesada.")
                     exit()
+            except ValueError:
+                print(f"❌ Error: Libro {libro} no está en ORDEN_TORAH.")
+                exit()
 
         if not resultados:
             print("❌ Error crítico: No hay datos en DB.")
@@ -183,7 +188,7 @@ def obtener_texto_mysql(memoria):
             conn.close()
 
 # ------------------------------------------------------------
-# 6. UTILIDADES VISUALES (sin cambios)
+# 5. UTILIDADES VISUALES (sin cambios)
 # ------------------------------------------------------------
 def zoom_in_effect(clip, zoom_ratio=0.04):
     def effect(get_frame, t):
@@ -199,6 +204,7 @@ def zoom_in_effect(clip, zoom_ratio=0.04):
         return np.array(img.crop([x, y, x + base_size[0], y + base_size[1]]))
     return clip.fl(effect)
 
+
 def limpiar_titulo(texto):
     if not texto:
         return "Torah Diaria"
@@ -206,6 +212,7 @@ def limpiar_titulo(texto):
     limpio = re.sub(r"[^\w\s\-\.,:;¡!¿?()áéíóúÁÉÍÓÚñÑ]", "", limpio, flags=re.UNICODE)
     limpio = re.sub(r"\s+", " ", limpio).strip()
     return limpio[:100] if limpio else "Torah Diaria"
+
 
 def generar_miniatura(ruta_base, titulo, ruta_out, formato="16:9"):
     try:
@@ -244,6 +251,7 @@ def generar_miniatura(ruta_base, titulo, ruta_out, formato="16:9"):
     except Exception as e:
         print(f"⚠️ Error miniatura: {e}")
 
+
 def preparar_outro(formato="9:16"):
     if not os.path.exists(RUTA_OUTRO):
         print(f"⚠️ Aviso: No se encontró outro en {RUTA_OUTRO}")
@@ -267,7 +275,7 @@ def preparar_outro(formato="9:16"):
         return None
 
 # ------------------------------------------------------------
-# 7. TEXTO A VOZ CON EDGE TTS (totalmente gratis)
+# 6. TEXTO A VOZ CON EDGE TTS (totalmente gratis)
 # ------------------------------------------------------------
 async def generar_voz_edge(texto, ruta_salida):
     """Genera MP3 usando Edge TTS (voz en español)."""
@@ -276,23 +284,24 @@ async def generar_voz_edge(texto, ruta_salida):
         subs = {"YHWH": "Adonay", "Yhwh": "Adonay", "Yahveh": "Adonay", "Jehova": "Adonay"}
         for k, v in subs.items():
             texto = re.sub(rf'(?i)\b{k}\b', v, texto)
-        
+
         communicate = edge_tts.Communicate(texto, "es-ES-ElviraNeural")  # Voz femenina clara
         await communicate.save(ruta_salida)
-        print(f"   ✅ Audio generado: {ruta_salida}")
+        print(f"  ✅ Audio generado: {ruta_salida}")
         return True
     except Exception as e:
-        print(f"   ❌ Error generando voz con Edge TTS: {e}")
+        print(f"  ❌ Error generando voz con Edge TTS: {e}")
         # Crear un audio mudo de respaldo
         os.system(f"ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 1 -q:a 9 -acodec libmp3lame {ruta_salida} -y")
         return False
+
 
 # Función síncrona para llamar desde el código principal
 def generar_voz(texto, ruta_salida):
     asyncio.run(generar_voz_edge(texto, ruta_salida))
 
 # ------------------------------------------------------------
-# 8. IA: GUION Y METADATOS CON DEEPSEEK
+# 7. IA: GUION Y METADATOS CON ZHIPU (GLM-4)
 # ------------------------------------------------------------
 def analizar_guion(texto_biblico):
     try:
@@ -300,6 +309,7 @@ def analizar_guion(texto_biblico):
             "Cinematic Biblical Realism, 8k resolution, ultra-detailed, dramatic chiaroscuro lighting, "
             "epic atmosphere, anamorphic lens flares, authentic textures of ancient wool and stone. NO cartoon."
         )
+
         prompt = f"""
 Actúa como experto editor de YouTube Shorts y Cineasta Bíblico.
 Analiza este bloque de versículos: "{texto_biblico}"
@@ -325,9 +335,10 @@ REGLAS OBLIGATORIAS:
 5) Entrega exactamente 6 elementos en "segmentos_visuales".
 6) No agregues campos extra.
 """
-        respuesta = call_deepseek(prompt, temperature=0.7)
+        respuesta = call_zhipu(prompt, temperature=0.7)
         if not respuesta:
-            raise ValueError("DeepSeek no devolvió respuesta")
+            raise ValueError("Zhipu no devolvió respuesta")
+
         raw = limpiar_json(respuesta)
         data = json.loads(raw)
 
@@ -335,9 +346,9 @@ REGLAS OBLIGATORIAS:
         segmentos_visuales = data.get("segmentos_visuales", [])
 
         if not texto_completo_audio:
-            raise ValueError("DeepSeek devolvió texto_completo_audio vacío")
+            raise ValueError("Zhipu devolvió texto_completo_audio vacío")
         if not isinstance(segmentos_visuales, list) or len(segmentos_visuales) == 0:
-            raise ValueError("DeepSeek devolvió segmentos_visuales inválido")
+            raise ValueError("Zhipu devolvió segmentos_visuales inválido")
 
         segmentos_limpios = []
         for s in segmentos_visuales:
@@ -371,8 +382,9 @@ REGLAS OBLIGATORIAS:
             ]
         }
 
+
 def generar_metadata_viral(texto_biblico, referencia, es_compilacion=False):
-    print("📢 Generando SEO con DeepSeek...")
+    print("📢 Generando SEO con Zhipu (GLM-4)...")
     base_desc = (
         f"\n👇 APÓYANOS & COMUNIDAD 👇"
         f"\n🙏 Patreon: {PATREON_LINK}"
@@ -397,9 +409,10 @@ def generar_metadata_viral(texto_biblico, referencia, es_compilacion=False):
             f"Tema: '{texto_biblico}'. Referencia: '{referencia}'. "
             "Sin markdown, sin texto extra."
         )
-        respuesta = call_deepseek(prompt, temperature=0.7)
+        respuesta = call_zhipu(prompt, temperature=0.7)
         if not respuesta:
-            raise ValueError("DeepSeek no devolvió respuesta")
+            raise ValueError("Zhipu no devolvió respuesta")
+
         raw = limpiar_json(respuesta)
         data = json.loads(raw)
 
@@ -430,11 +443,11 @@ def generar_metadata_viral(texto_biblico, referencia, es_compilacion=False):
         }
 
 # ------------------------------------------------------------
-# 9. GENERACIÓN DE IMÁGENES CON JANUS-PRO-7B (DeepSeek)
+# 8. IA: GENERACIÓN DE IMÁGENES CON ZHIPU (CogView)
 # ------------------------------------------------------------
 def crear_imagen_backup(ruta_salida):
     try:
-        print("      ⚠️ Creando imagen de respaldo (Backup)...")
+        print("  ⚠️ Creando imagen de respaldo (Backup)...")
         img = PIL.Image.new('RGB', (1080, 1920), color='#0f172a')
         try:
             draw = PIL.ImageDraw.Draw(img)
@@ -443,49 +456,71 @@ def crear_imagen_backup(ruta_salida):
             pass
         img.save(ruta_salida)
     except Exception as e:
-        print(f"      ❌ Error fatal creando backup: {e}")
+        print(f"  ❌ Error fatal creando backup: {e}")
 
-def generar_imagen_deepseek(prompt, ruta_salida):
-    """Genera imagen usando Janus-Pro-7B de DeepSeek en Hugging Face."""
-    print(f"      🎨 Generando imagen con DeepSeek Janus-Pro: {prompt[:60]}...")
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "guidance_scale": 7,
-            "num_inference_steps": 30,
-            "width": 1080,
-            "height": 1920
-        }
+
+def generar_imagen_zhipu(prompt, ruta_salida):
+    """Genera imagen usando CogView (Zhipu AI / BigModel)."""
+    print(f"  🎨 Generando imagen con Zhipu CogView: {prompt[:60]}...")
+
+    headers = {
+        "Authorization": f"Bearer {ZHIPU_API_KEY}",
+        "Content-Type": "application/json"
     }
+    payload = {
+        "model": ZHIPU_IMAGE_MODEL,
+        "prompt": prompt,
+        "size": "1080x1920"  # Formato vertical 9:16 nativo para Shorts/Reels
+    }
+
     for intento in range(3):
         try:
-            response = requests.post(JANUS_API_URL, headers=headers, json=payload, timeout=120)
+            response = requests.post(
+                ZHIPU_IMAGES_URL, headers=headers, json=payload, timeout=120
+            )
             if response.status_code == 200:
-                img = PIL.Image.open(BytesIO(response.content))
+                data = response.json()
+                items = data.get("data", [])
+                if not items:
+                    raise ValueError("Respuesta sin datos de imagen")
+
+                item = items[0]
+                img_bytes = None
+
+                # CogView puede devolver una URL o el contenido en base64,
+                # según el modelo/endpoint. Soportamos ambos casos.
+                if item.get("url"):
+                    img_resp = requests.get(item["url"], timeout=60)
+                    img_resp.raise_for_status()
+                    img_bytes = img_resp.content
+                elif item.get("b64_json"):
+                    img_bytes = base64.b64decode(item["b64_json"])
+                else:
+                    raise ValueError("Formato de respuesta de imagen no reconocido")
+
+                img = PIL.Image.open(BytesIO(img_bytes))
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
                 img = img.resize((1080, 1920), PIL.Image.LANCZOS)
                 img.save(ruta_salida, "JPEG", quality=90)
-                print(f"      ✅ Imagen guardada: {ruta_salida}")
+                print(f"  ✅ Imagen guardada: {ruta_salida}")
                 return True
-            elif response.status_code == 503:
-                print(f"      ⏳ Modelo cargando... esperando 30s (Intento {intento+1})")
-                time.sleep(30)
+
+            elif response.status_code == 429:
+                print(f"  ⏳ Límite de tasa alcanzado... esperando 15s (Intento {intento + 1})")
+                time.sleep(15)
             else:
-                print(f"      ❌ Error HF (Intento {intento+1}): {response.status_code} - {response.text[:200]}")
+                print(f"  ❌ Error Zhipu (Intento {intento + 1}): {response.status_code} - {response.text[:200]}")
                 time.sleep(5)
         except Exception as e:
-            print(f"      ❌ Error conexión HF (Intento {intento+1}): {e}")
+            print(f"  ❌ Error conexión Zhipu (Intento {intento + 1}): {e}")
             time.sleep(5)
-    print("      ❌ FRACASO: No se pudo generar la imagen.")
+
+    print("  ❌ FRACASO: No se pudo generar la imagen.")
     return False
 
-# Si prefieres mantener FLUX (más estable), descomenta esta línea y comenta la de arriba
-# generar_imagen_funcional = generar_imagen_deepseek  # o el nombre que uses
-
 # ------------------------------------------------------------
-# 10. ENSAMBLAJE DEL SHORT (9:16) - MODIFICADO PARA USAR NUEVA IMAGEN
+# 9. ENSAMBLAJE DEL SHORT (9:16)
 # ------------------------------------------------------------
 def crear_short(guion, referencia, carpeta):
     texto_completo_audio = guion.get("texto_completo_audio", "").strip()
@@ -497,7 +532,7 @@ def crear_short(guion, referencia, carpeta):
         segmentos_visuales = [{"prompt_visual": "Epic biblical landscape, cinematic realism, 8k"} for _ in range(6)]
 
     audio_unico_path = os.path.join(carpeta, "audio_unico.mp3")
-    print("   🎙️ Generando audio único completo...")
+    print("  🎙️ Generando audio único completo...")
     generar_voz(texto_completo_audio, audio_unico_path)
 
     if not os.path.exists(audio_unico_path):
@@ -505,7 +540,6 @@ def crear_short(guion, referencia, carpeta):
 
     audio_unico = AudioFileClip(audio_unico_path)
     duracion_total_audio = audio_unico.duration
-
     if duracion_total_audio <= 0:
         raise RuntimeError("Duración de audio inválida")
 
@@ -513,12 +547,11 @@ def crear_short(guion, referencia, carpeta):
     duracion_por_imagen = duracion_total_audio / max(num_segmentos, 1)
 
     clips_core = []
-
     for i, seg in enumerate(segmentos_visuales):
         i_path = os.path.join(carpeta, f"img_{i}.jpg")
         prompt_visual = seg.get('prompt_visual', 'Epic biblical scene, cinematic realism, 8k')
 
-        exito = generar_imagen_deepseek(prompt_visual, i_path)  # Usando Janus-Pro
+        exito = generar_imagen_zhipu(prompt_visual, i_path)  # Usando CogView (Zhipu)
         if not exito or not os.path.exists(i_path):
             crear_imagen_backup(i_path)
 
@@ -556,14 +589,14 @@ def crear_short(guion, referencia, carpeta):
     duracion_total = video_principal.duration + duracion_outro
     if duracion_total > 48.0:
         factor = duracion_total / 48.0
-        print(f"   ⚠️ Duración total {duracion_total:.2f}s > 48.0s. Aplicando speedx con factor={factor:.6f}")
+        print(f"  ⚠️ Duración total {duracion_total:.2f}s > 48.0s. Aplicando speedx con factor={factor:.6f}")
         final_video = final_video.fx(vfx.speedx, factor)
         if final_video.duration > 48.0:
             final_video = final_video.subclip(0, 48.0)
-        elif final_video.duration < 48.0:
-            faltante = 48.0 - final_video.duration
-            freeze = final_video.to_ImageClip(t=max(final_video.duration - 0.01, 0)).set_duration(faltante)
-            final_video = concatenate_videoclips([final_video, freeze], method="compose")
+    elif final_video.duration < 48.0:
+        faltante = 48.0 - final_video.duration
+        freeze = final_video.to_ImageClip(t=max(final_video.duration - 0.01, 0)).set_duration(faltante)
+        final_video = concatenate_videoclips([final_video, freeze], method="compose")
 
     musica_folder = "ASSETS/MUSIC"
     if os.path.exists(musica_folder) and os.listdir(musica_folder):
@@ -579,10 +612,11 @@ def crear_short(guion, referencia, carpeta):
 
     ruta_out = os.path.join(carpeta, "VIDEO_FINAL.mp4")
     final_video.write_videofile(ruta_out, fps=24, codec="libx264", audio_codec="aac")
+
     return ruta_out
 
 # ------------------------------------------------------------
-# 11. COMPILACIÓN (sin cambios relevantes, pero usa metadata con DeepSeek)
+# 10. COMPILACIÓN (usa metadata generada con Zhipu)
 # ------------------------------------------------------------
 def compilar_videos(horas_atras):
     print("📚 Iniciando Compilación...")
@@ -624,14 +658,16 @@ def compilar_videos(horas_atras):
         )
         fg = c.resize(height=1000).set_pos("center")
         clips.append(CompositeVideoClip([bg, fg], size=(1920, 1080)))
-        if len(clips) > 1:
-            clips[-1] = clips[-1].crossfadein(1)
+
+    if len(clips) > 1:
+        clips[-1] = clips[-1].crossfadein(1)
 
     outro = preparar_outro("16:9")
     if outro:
         clips.append(outro)
 
     video_final = concatenate_videoclips(clips, method="compose")
+
     ruta_c = os.path.join(CARPETA_SALIDA_BASE, f"COMPILACION_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}")
     os.makedirs(ruta_c, exist_ok=True)
 
@@ -653,14 +689,14 @@ def compilar_videos(horas_atras):
     return ruta_final
 
 # ------------------------------------------------------------
-# 12. MAIN
+# 11. MAIN
 # ------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Generador automático de Shorts y Compilaciones de la Torah")
-    parser.add_argument("--mode", choices=["standard", "compile"], default="standard", 
-                        help="Modo de ejecución: 'standard' para generar un short diario, 'compile' para unir los recientes.")
-    parser.add_argument("--hours", type=int, default=24, 
-                        help="Horas hacia atrás para compilar videos (usado solo en modo compile).")
+    parser.add_argument("--mode", choices=["standard", "compile"], default="standard",
+                         help="Modo de ejecución: 'standard' para generar un short diario, 'compile' para unir los recientes.")
+    parser.add_argument("--hours", type=int, default=24,
+                         help="Horas hacia atrás para compilar videos (usado solo en modo compile).")
     args = parser.parse_args()
 
     # --- MODO COMPILACIÓN ---
@@ -675,7 +711,7 @@ def main():
 
     # --- MODO STANDARD (Generación de Short) ---
     print("▶️ Iniciando generación de Short (Modo Standard)...")
-    
+
     # 1. Recuperar el estado y extraer datos
     memoria = gestionar_progreso()
     info = obtener_texto_mysql(memoria)
@@ -693,11 +729,9 @@ def main():
     # 4. Limpiar y estructurar los metadatos (SEO)
     titulo = limpiar_titulo(meta.get('titulo', f"Lectura: {info['referencia_texto']}"))
     descripcion = str(meta.get('descripcion', '')).strip()
-    
     tags = meta.get('tags', ["#Torah", "#Biblia"])
     if not isinstance(tags, list):
         tags = ["#Torah", "#Biblia"]
-        
     tags = [str(t).strip() for t in tags if str(t).strip()]
     tags = [t if t.startswith("#") else f"#{t}" for t in tags]
 
@@ -736,6 +770,7 @@ def main():
 
     # 8. Actualizar progreso para la próxima ejecución
     actualizar_memoria(info['libro'], info['capitulo'], info['versiculo_fin'])
+
     print(f"✅ ¡Short finalizado con éxito! Memoria actualizada.\n📁 Ubicación: {ruta_video}")
 
 

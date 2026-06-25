@@ -8,16 +8,8 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip install --upgrade pip
 
-RUN pip install --no-cache-dir \
-    moviepy==1.0.3 \
-    decorator==4.4.2 \
-    imageio==2.5.0 \
-    openai \
-    edge-tts \
-    pillow \
-    mysql-connector-python \
-    requests \
-    'numpy<2.0.0'
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
