@@ -58,6 +58,7 @@ ARCHIVO_MEMORIA = "memoria_progreso.json"
 AMAZON_LINK = "https://amzn.to/4qRzgBC"
 PATREON_LINK = "https://patreon.com/TorahDiaria"
 ORDEN_TORAH = ["Bereshit", "Shemot", "Vayikra", "Bamidbar", "Devarim"]
+VERSICULOS_POR_BLOQUE = 5  # Cantidad de versículos que se procesan en cada short
 
 DB_CONFIG = {
     # Por defecto usa 'localhost' (correr el script directo en tu PC).
@@ -115,7 +116,7 @@ def actualizar_memoria(libro, capitulo, versiculo_fin):
 
 
 def obtener_texto_mysql(memoria):
-    print("🔌 Consultando DB (Bloque de 10 versículos)...")
+    print(f"🔌 Consultando DB (Bloque de {VERSICULOS_POR_BLOQUE} versículos)...")
     conn = None
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
@@ -129,13 +130,13 @@ def obtener_texto_mysql(memoria):
             "SELECT book_name_es, chapter, verse, spanish_text "
             "FROM torah_books "
             "WHERE book_name_es = %s AND chapter = %s AND verse > %s "
-            "ORDER BY verse ASC LIMIT 10"
+            f"ORDER BY verse ASC LIMIT {VERSICULOS_POR_BLOQUE}"
         )
         cursor.execute(sql, (libro, cap, ver))
         resultados = cursor.fetchall()
 
-        if len(resultados) < 10:
-            faltantes = 10 - len(resultados)
+        if len(resultados) < VERSICULOS_POR_BLOQUE:
+            faltantes = VERSICULOS_POR_BLOQUE - len(resultados)
             cap_sig = cap + 1
             sql_next = (
                 "SELECT book_name_es, chapter, verse, spanish_text "
@@ -157,7 +158,7 @@ def obtener_texto_mysql(memoria):
                         "SELECT book_name_es, chapter, verse, spanish_text "
                         "FROM torah_books "
                         "WHERE book_name_es = %s AND chapter = 1 "
-                        "ORDER BY verse ASC LIMIT 10"
+                        f"ORDER BY verse ASC LIMIT {VERSICULOS_POR_BLOQUE}"
                     )
                     cursor.execute(sql_book_sig, (nuevo_libro,))
                     resultados = cursor.fetchall()
@@ -218,11 +219,57 @@ def limpiar_titulo(texto):
     return limpio[:100] if limpio else "Torah Diaria"
 
 
+def acortar_para_thumbnail(titulo, max_chars=55):
+    """
+    Los títulos de SEO suelen ser largos (buenos para YouTube, malos para
+    una miniatura). Esta función corta el título a la primera frase o a
+    max_chars, lo que sea más corto, intentando no partir una palabra.
+    """
+    titulo = titulo.strip()
+    # Si el título tiene separador de subtítulo (-, :, |), usar solo la primera parte
+    for sep in [" - ", ": ", " | "]:
+        if sep in titulo:
+            titulo = titulo.split(sep)[0].strip()
+            break
+    if len(titulo) <= max_chars:
+        return titulo
+    recorte = titulo[:max_chars]
+    if " " in recorte:
+        recorte = recorte.rsplit(" ", 1)[0]
+    return recorte.rstrip(",.;:") + "..."
+
+
+def envolver_texto_por_ancho(draw, texto, fnt, ancho_max_px):
+    """
+    Envuelve texto en líneas midiendo el ancho REAL de cada palabra con la
+    fuente dada (en vez de estimar por cantidad de caracteres, que falla
+    con fuentes Bold/anchas). Garantiza que ninguna línea exceda ancho_max_px,
+    salvo que una sola palabra ya sea más ancha que el límite.
+    """
+    palabras = texto.split()
+    if not palabras:
+        return [texto]
+
+    lineas = []
+    linea_actual = palabras[0]
+    for palabra in palabras[1:]:
+        candidato = f"{linea_actual} {palabra}"
+        ancho_candidato = draw.textbbox((0, 0), candidato, font=fnt)[2]
+        if ancho_candidato <= ancho_max_px:
+            linea_actual = candidato
+        else:
+            lineas.append(linea_actual)
+            linea_actual = palabra
+    lineas.append(linea_actual)
+    return lineas
+
+
 def generar_miniatura(ruta_base, titulo, ruta_out, formato="16:9"):
     try:
         if not os.path.exists(ruta_base):
             return
         titulo = limpiar_titulo(titulo)
+        titulo = acortar_para_thumbnail(titulo, max_chars=45)
         img = PIL.Image.open(ruta_base).convert("RGBA")
         tw, th = (1280, 720) if formato == "16:9" else (720, 1280)
         ratio_img = img.width / img.height
@@ -237,33 +284,79 @@ def generar_miniatura(ruta_base, titulo, ruta_out, formato="16:9"):
         x = (new_w - tw) / 2
         y = (new_h - th) / 2
         img = img.crop((x, y, x + tw, y + th))
-        overlay = PIL.Image.new('RGBA', img.size, (0, 0, 0, 100))
+        overlay = PIL.Image.new('RGBA', img.size, (0, 0, 0, 110))
         img = PIL.Image.alpha_composite(img, overlay)
         draw = PIL.ImageDraw.Draw(img)
-        try:
-            fnt = PIL.ImageFont.truetype(
-                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-                60 if formato == "9:16" else 80
+
+        # Tamaño de fuente GRANDE por defecto. Si el título es muy largo y no
+        # cabe ni en 5 líneas, se reduce progresivamente hasta que entre.
+        fontsize_inicial = 130 if formato == "9:16" else 130
+        fontsize_minimo = 60
+        max_lineas = 5
+        ancho_objetivo_px = tw * 0.88  # margen lateral del 6% por lado
+
+        fontsize = fontsize_inicial
+        lineas = [titulo]
+        fnt = None
+
+        while fontsize >= fontsize_minimo:
+            try:
+                fnt = PIL.ImageFont.truetype(
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                    fontsize
+                )
+            except Exception:
+                fnt = PIL.ImageFont.load_default()
+
+            lineas = envolver_texto_por_ancho(draw, titulo, fnt, ancho_objetivo_px)
+
+            ancho_max_linea = max(
+                (draw.textbbox((0, 0), linea, font=fnt)[2] for linea in lineas),
+                default=0
             )
-        except Exception:
-            fnt = PIL.ImageFont.load_default()
-        w_t, h_t = draw.textsize(titulo, font=fnt) if hasattr(draw, 'textsize') else (300, 100)
-        xt, yt = (tw - w_t) / 2, (th - h_t) / 2
-        draw.text((xt - 3, yt - 3), titulo, font=fnt, fill="black")
-        draw.text((xt, yt), titulo, font=fnt, fill="yellow")
+
+            if len(lineas) <= max_lineas and ancho_max_linea <= ancho_objetivo_px:
+                break
+            fontsize -= 6
+
+        alturas = []
+        for linea in lineas:
+            bbox = draw.textbbox((0, 0), linea, font=fnt)
+            alturas.append(bbox[3] - bbox[1])
+        espacio_lineas = int(fontsize * 0.25)
+        alto_total = sum(alturas) + espacio_lineas * (len(lineas) - 1)
+
+        yt = (th - alto_total) / 2
+        for i, linea in enumerate(lineas):
+            bbox = draw.textbbox((0, 0), linea, font=fnt)
+            w_t = bbox[2] - bbox[0]
+            xt = (tw - w_t) / 2
+            # Contorno más grueso para que se lea bien sobre cualquier fondo
+            grosor = max(int(fontsize * 0.04), 2)
+            for dx in range(-grosor, grosor + 1):
+                for dy in range(-grosor, grosor + 1):
+                    if dx != 0 or dy != 0:
+                        draw.text((xt + dx, yt + dy), linea, font=fnt, fill="black")
+            draw.text((xt, yt), linea, font=fnt, fill="yellow")
+            yt += alturas[i] + espacio_lineas
+
         img.convert("RGB").save(ruta_out, "JPEG", quality=90)
     except Exception as e:
         print(f"⚠️ Error miniatura: {e}")
 
 
 def crear_clip_texto_pil(texto, size, fontsize, color="white", color_borde="black",
-                          ancho_max_chars=28):
+                          ancho_max_px=None):
     """
     Crea una imagen RGBA con texto centrado y envuelto en varias líneas,
     usando PIL directamente (no depende de ImageMagick, a diferencia de
-    TextClip de MoviePy). Devuelve un array numpy listo para ImageClip.
+    TextClip de MoviePy). El envuelto de línea mide el ancho REAL de cada
+    palabra (no estima por cantidad de caracteres), evitando que el texto
+    salga desproporcionadamente pequeño o mal partido con fuentes Bold.
+    Devuelve un array numpy (H, W, 4) listo para separar en RGB + máscara alpha.
     """
-    import textwrap
+    if ancho_max_px is None:
+        ancho_max_px = size[0] * 0.88  # margen lateral del 6% por lado
 
     img = PIL.Image.new("RGBA", size, (0, 0, 0, 0))
     draw = PIL.ImageDraw.Draw(img)
@@ -275,7 +368,7 @@ def crear_clip_texto_pil(texto, size, fontsize, color="white", color_borde="blac
     except Exception:
         fnt = PIL.ImageFont.load_default()
 
-    lineas = textwrap.wrap(texto, width=ancho_max_chars) or [texto]
+    lineas = envolver_texto_por_ancho(draw, texto, fnt, ancho_max_px)
 
     # Calcular alto total para centrar verticalmente el bloque de texto
     alturas = []
@@ -301,17 +394,32 @@ def crear_clip_texto_pil(texto, size, fontsize, color="white", color_borde="blac
     return np.array(img)
 
 
+def imageclip_con_alpha(arr_rgba, duracion):
+    """
+    Construye un ImageClip con transparencia real a partir de un array RGBA,
+    separando explícitamente el canal RGB y usándolo junto a una máscara
+    (ImageClip con ismask=True). Este método es el más confiable en
+    MoviePy 1.0.3 -- pasar transparent=True directamente puede no aplicar
+    bien la máscara según la versión de Pillow/numpy instalada.
+    """
+    rgb = arr_rgba[:, :, :3]
+    alpha = arr_rgba[:, :, 3] / 255.0  # Máscara en rango 0.0-1.0
+
+    clip_rgb = ImageClip(rgb).set_duration(duracion)
+    mask_clip = ImageClip(alpha, ismask=True).set_duration(duracion)
+    return clip_rgb.set_mask(mask_clip)
+
+
 def crear_clip_referencia(referencia_texto, duracion=3.0, size=(1080, 1920)):
     """
     Crea el clip de texto con la referencia del pasaje (ej. 'Vayikra 14:26-35')
     que se muestra en los primeros segundos del video.
     """
     arr = crear_clip_texto_pil(
-        referencia_texto, size=size, fontsize=70,
-        color="white", color_borde="black", ancho_max_chars=22
+        referencia_texto, size=size, fontsize=95,
+        color="white", color_borde="black", ancho_max_px=size[0] * 0.85
     )
-    clip = ImageClip(arr, ismask=False, transparent=True).set_duration(duracion)
-    return clip
+    return imageclip_con_alpha(arr, duracion)
 
 
 def crear_clips_subtitulos(frases, size=(1080, 1920)):
@@ -325,13 +433,12 @@ def crear_clips_subtitulos(frases, size=(1080, 1920)):
     for frase in frases:
         duracion = max(frase["fin"] - frase["inicio"], 0.2)
         arr = crear_clip_texto_pil(
-            frase["texto"].upper(), size=(size[0], 280), fontsize=46,
-            color="white", color_borde="black", ancho_max_chars=26
+            frase["texto"].upper(), size=(size[0], 320), fontsize=58,
+            color="white", color_borde="black", ancho_max_px=size[0] * 0.88
         )
         clip = (
-            ImageClip(arr, transparent=True)
+            imageclip_con_alpha(arr, duracion)
             .set_start(frase["inicio"])
-            .set_duration(duracion)
             .set_position(("center", y_pos))
         )
         clips.append(clip)
@@ -396,6 +503,14 @@ async def generar_voz_edge(texto, ruta_salida):
                     })
 
         print(f"  ✅ Audio generado: {ruta_salida}")
+        print(f"  🔎 Palabras con tiempo capturadas (word_boundaries): {len(word_boundaries)}")
+        if word_boundaries:
+            primera = word_boundaries[0]
+            ultima = word_boundaries[-1]
+            print(f"  🔎 Primera palabra: '{primera['texto']}' [{primera['inicio']:.2f}s-{primera['fin']:.2f}s]")
+            print(f"  🔎 Última palabra: '{ultima['texto']}' [{ultima['inicio']:.2f}s-{ultima['fin']:.2f}s]")
+        else:
+            print("  ⚠️ No se recibió ningún WordBoundary del servicio. No habrá subtítulos en este short.")
         return word_boundaries
     except Exception as e:
         print(f"  ❌ Error generando voz con Edge TTS: {e}")
@@ -457,8 +572,7 @@ Responde ÚNICAMENTE con JSON válido en esta estructura EXACTA:
     {{"prompt_visual": "descripción épica en inglés para imagen 2"}},
     {{"prompt_visual": "descripción épica en inglés para imagen 3"}},
     {{"prompt_visual": "descripción épica en inglés para imagen 4"}},
-    {{"prompt_visual": "descripción épica en inglés para imagen 5"}},
-    {{"prompt_visual": "descripción épica en inglés para imagen 6"}}
+    {{"prompt_visual": "descripción épica en inglés para imagen 5"}}
   ]
 }}
 
@@ -467,7 +581,7 @@ REGLAS OBLIGATORIAS:
 2) Debe empezar obligatoriamente con un Hook/Gancho intrigante en la primera frase.
 3) No incluyas títulos, listas ni numeración dentro del texto.
 4) Cada "prompt_visual" debe estar en inglés y debe incluir este estilo: {ESTILO_VISUAL}
-5) Entrega exactamente 6 elementos en "segmentos_visuales".
+5) Entrega exactamente 5 elementos en "segmentos_visuales".
 6) No agregues campos extra.
 """
         respuesta = call_zhipu(prompt, temperature=0.7)
@@ -512,7 +626,6 @@ REGLAS OBLIGATORIAS:
                 {"prompt_visual": "Ancient desert camp at dawn, dramatic sky, biblical realism, 8k"},
                 {"prompt_visual": "Hebrew scribes writing sacred text, intense chiaroscuro, 8k"},
                 {"prompt_visual": "Prophetic figure on mountain ridge, wind and dust, epic cinematic shot, 8k"},
-                {"prompt_visual": "Close-up of weathered hands holding parchment, ultra detailed, 8k"},
                 {"prompt_visual": "Wide shot of promised land horizon, golden light, cinematic biblical realism, 8k"}
             ]
         }
@@ -667,7 +780,7 @@ def crear_short(guion, referencia, carpeta):
     if not texto_completo_audio:
         texto_completo_audio = f"Gancho: descubre el mensaje oculto de {referencia}."
     if not segmentos_visuales:
-        segmentos_visuales = [{"prompt_visual": "Epic biblical landscape, cinematic realism, 8k"} for _ in range(6)]
+        segmentos_visuales = [{"prompt_visual": "Epic biblical landscape, cinematic realism, 8k"} for _ in range(5)]
 
     audio_unico_path = os.path.join(carpeta, "audio_unico.mp3")
     print("  🎙️ Generando audio único completo...")
@@ -684,6 +797,7 @@ def crear_short(guion, referencia, carpeta):
     # Agrupar las palabras (con sus tiempos reales del TTS) en frases cortas
     # para mostrarlas como subtítulos sincronizados.
     frases_subtitulo = agrupar_en_frases(word_boundaries, palabras_por_frase=7) if word_boundaries else []
+    print(f"  🔎 Frases de subtítulo generadas: {len(frases_subtitulo)}")
 
     num_segmentos = len(segmentos_visuales)
     duracion_por_imagen = duracion_total_audio / max(num_segmentos, 1)
@@ -719,6 +833,31 @@ def crear_short(guion, referencia, carpeta):
         ultimo_frame = video_principal.to_ImageClip(t=video_principal.duration - 0.01).set_duration(faltante)
         video_principal = concatenate_videoclips([video_principal, ultimo_frame], method="compose").set_audio(audio_unico)
 
+    # --- Ajustar velocidad ANTES de superponer texto, para no descalibrar
+    # los tiempos de los subtítulos. Si hace falta acelerar, se recalculan
+    # aquí mismo los tiempos de cada frase dividiendo por el factor. ---
+    outro = preparar_outro("9:16")
+    duracion_outro = outro.duration if outro else 0.0
+    duracion_estim_total = video_principal.duration + duracion_outro
+
+    factor_velocidad = 1.0
+    if duracion_estim_total > 48.0:
+        factor_velocidad = duracion_estim_total / 48.0
+        print(f"  ⚠️ Duración total estimada {duracion_estim_total:.2f}s > 48.0s. Acelerando video y audio con factor={factor_velocidad:.6f}")
+        # video_principal ya tiene el audio adjunto (set_audio se hizo antes),
+        # así que speedx acelera ambos a la vez de forma consistente.
+        video_principal = video_principal.fx(vfx.speedx, factor_velocidad)
+        # Recalcular tiempos de las frases de subtítulo para que sigan
+        # sincronizadas tras la aceleración.
+        for frase in frases_subtitulo:
+            frase["inicio"] = frase["inicio"] / factor_velocidad
+            frase["fin"] = frase["fin"] / factor_velocidad
+
+    # Guardar el audio definitivo (ya acelerado si aplicó speedx) para
+    # reasignarlo tras el CompositeVideoClip, que no copia el audio del
+    # primer clip automáticamente.
+    audio_definitivo = video_principal.audio
+
     # --- Capa de texto: referencia del versículo (primeros segundos) + subtítulos ---
     capas_overlay = [video_principal]
 
@@ -730,11 +869,9 @@ def crear_short(guion, referencia, carpeta):
     if frases_subtitulo:
         capas_overlay.extend(crear_clips_subtitulos(frases_subtitulo))
 
+    print(f"  🔎 Total de capas en el CompositeVideoClip (1 video + texto): {len(capas_overlay)}")
     video_principal = CompositeVideoClip(capas_overlay, size=(1080, 1920)).set_duration(video_principal.duration)
-    video_principal = video_principal.set_audio(audio_unico)
-
-    outro = preparar_outro("9:16")
-    duracion_outro = outro.duration if outro else 0.0
+    video_principal = video_principal.set_audio(audio_definitivo)
 
     clips_finales = [video_principal]
     if outro:
@@ -742,13 +879,8 @@ def crear_short(guion, referencia, carpeta):
 
     final_video = concatenate_videoclips(clips_finales, method="compose")
 
-    duracion_total = video_principal.duration + duracion_outro
-    if duracion_total > 48.0:
-        factor = duracion_total / 48.0
-        print(f"  ⚠️ Duración total {duracion_total:.2f}s > 48.0s. Aplicando speedx con factor={factor:.6f}")
-        final_video = final_video.fx(vfx.speedx, factor)
-        if final_video.duration > 48.0:
-            final_video = final_video.subclip(0, 48.0)
+    if final_video.duration > 48.0:
+        final_video = final_video.subclip(0, 48.0)
     elif final_video.duration < 48.0:
         faltante = 48.0 - final_video.duration
         freeze = final_video.to_ImageClip(t=max(final_video.duration - 0.01, 0)).set_duration(faltante)
