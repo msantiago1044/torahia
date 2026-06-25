@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TorahIA - Publicar en TikTok</title>
+    <style>
+        :root {
+            --tiktok-pink: #ff0050;
+            --tiktok-cyan: #00f2ea;
+            --dark-gray: #252525;
+            --light-bg: #fdfdfd;
+        }
+
+        body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--light-bg);
+            color: #121212;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* Encabezado Profesional */
+        header {
+            width: 100%;
+            padding: 20px 0;
+            background: white;
+            border-bottom: 2px solid #eee;
+            text-align: center;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }
+
+        .tiktok-dev-logo {
+            width: 220px;
+            margin-bottom: 10px;
+        }
+
+        .main-container {
+            max-width: 900px;
+            width: 95%;
+            margin: 30px 0;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 25px;
+        }
+
+        /* Secciones de Tarjetas */
+        .card {
+            background: white;
+            border-radius: 12px;
+            border: 1px solid #e1e1e1;
+            padding: 25px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        }
+
+        h2 { font-size: 1.2rem; margin-top: 0; color: #333; border-left: 4px solid var(--tiktok-pink); padding-left: 10px; }
+
+        /* Área de Carga y Preview */
+        .upload-zone {
+            background: #f8f8f8;
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+
+        .upload-zone:hover { border-color: var(--tiktok-cyan); background: #f0fdfd; }
+
+        #video-preview {
+            width: 100%;
+            height: 350px;
+            background: black;
+            border-radius: 6px;
+            margin-top: 15px;
+            display: none; /* Se activa al subir archivo */
+        }
+
+        /* Estilo de Inputs */
+        .form-group { margin-bottom: 20px; }
+        label { display: block; font-weight: bold; margin-bottom: 8px; font-size: 0.9rem; }
+        select, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 1rem;
+        }
+
+        /* Enlace de YouTube Destacado */
+        .youtube-section {
+            background: #fff0f0;
+            border: 1px solid #ffcccc;
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .youtube-btn {
+            color: #ff0000;
+            font-weight: bold;
+            text-decoration: none;
+            font-size: 1.1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        /* Botón TikTok Oficial */
+        .tiktok-auth-btn {
+            cursor: pointer;
+            width: 250px;
+            transition: transform 0.2s;
+            margin: 20px 0;
+        }
+
+        .tiktok-auth-btn:hover { transform: scale(1.03); }
+
+        /* NUEVO: Cuadro de resultado del Paso 3 */
+        .auth-result-box {
+            display: none;
+            background: #e7f9f7;
+            border: 1px solid var(--tiktok-cyan);
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            width: 100%;
+            text-align: center;
+        }
+        .code-text {
+            font-family: monospace;
+            background: #fff;
+            padding: 5px;
+            border: 1px solid #ccc;
+            word-break: break-all;
+        }
+
+        /* Footer Legal */
+        footer {
+            width: 100%;
+            background: #121212;
+            color: white;
+            padding: 40px 0;
+            text-align: center;
+            margin-top: auto;
+        }
+
+        .footer-nav { margin-bottom: 20px; }
+        .footer-nav a {
+            color: var(--tiktok-cyan);
+            text-decoration: none;
+            font-weight: bold;
+            margin: 0 15px;
+            font-size: 1.1rem;
+            border-bottom: 2px solid transparent;
+        }
+
+        .footer-nav a:hover { border-bottom-color: var(--tiktok-cyan); }
+
+        .legal-disclaimer {
+            font-size: 0.8rem;
+            color: #888;
+            max-width: 600px;
+            margin: 0 auto;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <img src="assets/tiktok_for_developers_logo.png" alt="TikTok for Developers" class="tiktok-dev-logo">
+        <div style="font-weight: bold; font-size: 1.4rem;">TorahIA Project</div>
+    </header>
+
+    <div class="main-container">
+        
+        <div class="card">
+            <h2>1. Contenido de la Torah</h2>
+
+            <div id="auth-result" class="auth-result-box">
+                <strong>✅ Autorización Exitosa</strong><br>
+                <small>Copia este código en tu script de Python:</small>
+                <div id="auth-code" class="code-text"></div>
+            </div>
+
+            <div class="youtube-section">
+                <a href="https://www.youtube.com/@TorahDiariaEspañol" target="_blank" class="youtube-btn">
+                    <img src="https://www.youtube.com/s/desktop/28236d80/img/favicon_144x144.png" width="30" alt="">
+                    Canal Oficial de YouTube
+                </a>
+            </div>
+            
+            <label>Subir Video para Previsualización:</label>
+            <div class="upload-zone" onclick="document.getElementById('video-upload').click()">
+                <span>📁 Haz clic para cargar el video de hoy</span>
+                <input type="file" id="video-upload" accept="video/*" style="display:none">
+            </div>
+            <video id="video-preview" controls></video>
+        </div>
+
+        <div class="card" style="display: flex; flex-direction: column; align-items: center;">
+            <h2 style="width: 100%;">2. Configuración de Publicación</h2>
+            
+            <div class="form-group" style="width: 100%;">
+                <label>Descripción del Video:</label>
+                <textarea rows="3">Porción diaria de la Torah. Aprendizaje y reflexión. #Torah #Israel #Sabiduria</textarea>
+            </div>
+
+            <div class="form-group" style="width: 100%;">
+                <label>Privacidad (Scope: video.publish):</label>
+                <select id="privacy-select">
+                    <option value="PUBLIC">Público (Todo el mundo)</option>
+                    <option value="FRIENDS">Amigos (Mutuos)</option>
+                    <option value="SELF_ONLY" selected>Privado (Solo yo)</option>
+                </select>
+            </div>
+
+            <p style="font-size: 0.8rem; color: #666; text-align: center;">
+                Al hacer clic abajo, se iniciará la autorización segura con TikTok Login Kit.
+            </p>
+
+            <img src="assets/btn_login_black.png" alt="Log in with TikTok" class="tiktok-auth-btn" onclick="alert('Conectando con TikTok...')">
+            
+            <div style="font-size: 0.7rem; color: #999; text-align: center;">
+                Al publicar, aceptas la <a href="https://www.tiktok.com/legal/music-usage-confirmation" target="_blank">Confirmación de uso de música de TikTok</a>.
+            </div>
+        </div>
+
+    </div>
+
+    <footer>
+        <div class="footer-nav">
+            <a href="privacy.html">POLÍTICA DE PRIVACIDAD</a>
+            <a href="terms.html">TÉRMINOS DE SERVICIO</a>
+        </div>
+        <div class="legal-disclaimer">
+            &copy; 2026 TorahIA. Esta aplicación es una herramienta de integración técnica desarrollada por un Ingeniero de Sistemas certificado. No almacenamos datos privados sin consentimiento. El uso de la API de TikTok está sujeto a los términos de TikTok for Developers.
+        </div>
+    </footer>
+
+    <script>
+        const videoInput = document.getElementById('video-upload');
+        const videoPreview = document.getElementById('video-preview');
+
+        videoInput.addEventListener('change', function() {
+            const file = this.files[0];
+            if (file) {
+                const url = URL.createObjectURL(file);
+                videoPreview.src = url;
+                videoPreview.style.display = 'block';
+            }
+        });
+
+        // LÓGICA PASO 3 MEJORADA: DETECTAR CÓDIGO OAUTH
+        window.onload = function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const code = urlParams.get('code');
+            if (code) {
+                // En lugar de mostrarlo siempre, lo guardamos en consola o pedimos un clic
+                console.log("Código recibido:", code); 
+                
+                const resultBox = document.getElementById('auth-result');
+                resultBox.style.display = 'block';
+                
+                // El código solo se ve si haces clic en un botón de "Ver código"
+                document.getElementById('auth-code').innerHTML = `
+                    <button onclick="this.innerText='${code}'" style="padding:5px; cursor:pointer">
+                        Click para ver código de seguridad
+                    </button>`;
+                
+                resultBox.scrollIntoView();
+                
+                // Limpiamos la URL para que el código no se quede en la barra de direcciones
+                window.history.replaceState({}, document.title, "/");
+            }
+        }
+    </script>
+</body>
+</html>

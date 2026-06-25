@@ -1,9 +1,8 @@
-# Vídeos e infraestructura local
-firebase/
-PRODUCCION_TORAH/
-
-# Credenciales y archivos temporales/locales
 credentials.json
 memoria_progreso.json
+PRODUCCION_TORAH/
+firebase/
+venv/
 __pycache__/
 *.pyc
+.env

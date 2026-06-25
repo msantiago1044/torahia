@@ -60,7 +60,11 @@ PATREON_LINK = "https://patreon.com/TorahDiaria"
 ORDEN_TORAH = ["Bereshit", "Shemot", "Vayikra", "Bamidbar", "Devarim"]
 
 DB_CONFIG = {
-    'host': 'host.docker.internal',
+    # Por defecto usa 'localhost' (correr el script directo en tu PC).
+    # Si corres dentro de Docker y necesitas llegar al MySQL del host,
+    # define la variable de entorno DB_HOST=host.docker.internal
+    # (en Linux agrega --add-host=host.docker.internal:host-gateway al docker run).
+    'host': os.environ.get('DB_HOST', 'localhost'),
     'user': 'root',
     'password': creds.get("db_password"),
     'database': 'torah_db'
@@ -252,6 +256,89 @@ def generar_miniatura(ruta_base, titulo, ruta_out, formato="16:9"):
         print(f"⚠️ Error miniatura: {e}")
 
 
+def crear_clip_texto_pil(texto, size, fontsize, color="white", color_borde="black",
+                          ancho_max_chars=28):
+    """
+    Crea una imagen RGBA con texto centrado y envuelto en varias líneas,
+    usando PIL directamente (no depende de ImageMagick, a diferencia de
+    TextClip de MoviePy). Devuelve un array numpy listo para ImageClip.
+    """
+    import textwrap
+
+    img = PIL.Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = PIL.ImageDraw.Draw(img)
+    try:
+        fnt = PIL.ImageFont.truetype(
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            fontsize
+        )
+    except Exception:
+        fnt = PIL.ImageFont.load_default()
+
+    lineas = textwrap.wrap(texto, width=ancho_max_chars) or [texto]
+
+    # Calcular alto total para centrar verticalmente el bloque de texto
+    alturas = []
+    for linea in lineas:
+        bbox = draw.textbbox((0, 0), linea, font=fnt)
+        alturas.append(bbox[3] - bbox[1])
+    espacio_lineas = 10
+    alto_total = sum(alturas) + espacio_lineas * (len(lineas) - 1)
+
+    y = (size[1] - alto_total) / 2
+    for i, linea in enumerate(lineas):
+        bbox = draw.textbbox((0, 0), linea, font=fnt)
+        w_t = bbox[2] - bbox[0]
+        x = (size[0] - w_t) / 2
+        # Borde (contorno) para legibilidad sobre cualquier fondo
+        for dx in (-2, -1, 0, 1, 2):
+            for dy in (-2, -1, 0, 1, 2):
+                if dx != 0 or dy != 0:
+                    draw.text((x + dx, y + dy), linea, font=fnt, fill=color_borde)
+        draw.text((x, y), linea, font=fnt, fill=color)
+        y += alturas[i] + espacio_lineas
+
+    return np.array(img)
+
+
+def crear_clip_referencia(referencia_texto, duracion=3.0, size=(1080, 1920)):
+    """
+    Crea el clip de texto con la referencia del pasaje (ej. 'Vayikra 14:26-35')
+    que se muestra en los primeros segundos del video.
+    """
+    arr = crear_clip_texto_pil(
+        referencia_texto, size=size, fontsize=70,
+        color="white", color_borde="black", ancho_max_chars=22
+    )
+    clip = ImageClip(arr, ismask=False, transparent=True).set_duration(duracion)
+    return clip
+
+
+def crear_clips_subtitulos(frases, size=(1080, 1920)):
+    """
+    A partir de una lista de frases con tiempos {"texto","inicio","fin"},
+    crea una lista de ImageClips posicionados en la parte inferior del video,
+    cada uno mostrado durante su rango de tiempo correspondiente.
+    """
+    clips = []
+    y_pos = int(size[1] * 0.74)  # Subtítulo en el tercio inferior
+    for frase in frases:
+        duracion = max(frase["fin"] - frase["inicio"], 0.2)
+        arr = crear_clip_texto_pil(
+            frase["texto"].upper(), size=(size[0], 280), fontsize=46,
+            color="white", color_borde="black", ancho_max_chars=26
+        )
+        clip = (
+            ImageClip(arr, transparent=True)
+            .set_start(frase["inicio"])
+            .set_duration(duracion)
+            .set_position(("center", y_pos))
+        )
+        clips.append(clip)
+    return clips
+
+
+
 def preparar_outro(formato="9:16"):
     if not os.path.exists(RUTA_OUTRO):
         print(f"⚠️ Aviso: No se encontró outro en {RUTA_OUTRO}")
@@ -277,28 +364,76 @@ def preparar_outro(formato="9:16"):
 # ------------------------------------------------------------
 # 6. TEXTO A VOZ CON EDGE TTS (totalmente gratis)
 # ------------------------------------------------------------
+VOZ_NARRADOR = "es-MX-JorgeNeural"  # Voz masculina, español latino (México)
+
 async def generar_voz_edge(texto, ruta_salida):
-    """Genera MP3 usando Edge TTS (voz en español)."""
+    """
+    Genera MP3 usando Edge TTS (voz masculina en español latino) y devuelve
+    además la lista de "word boundaries" (palabra, inicio, fin en segundos)
+    que se usa luego para generar los subtítulos sincronizados.
+    """
     try:
         # Reemplazar nombres divinos para evitar pronunciación extraña
         subs = {"YHWH": "Adonay", "Yhwh": "Adonay", "Yahveh": "Adonay", "Jehova": "Adonay"}
         for k, v in subs.items():
             texto = re.sub(rf'(?i)\b{k}\b', v, texto)
 
-        communicate = edge_tts.Communicate(texto, "es-ES-ElviraNeural")  # Voz femenina clara
-        await communicate.save(ruta_salida)
+        communicate = edge_tts.Communicate(texto, VOZ_NARRADOR)
+        word_boundaries = []
+
+        with open(ruta_salida, "wb") as audio_file:
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_file.write(chunk["data"])
+                elif chunk["type"] == "WordBoundary":
+                    # offset/duration vienen en unidades de 100 nanosegundos
+                    inicio = chunk["offset"] / 10_000_000
+                    duracion = chunk["duration"] / 10_000_000
+                    word_boundaries.append({
+                        "texto": chunk["text"],
+                        "inicio": inicio,
+                        "fin": inicio + duracion
+                    })
+
         print(f"  ✅ Audio generado: {ruta_salida}")
-        return True
+        return word_boundaries
     except Exception as e:
         print(f"  ❌ Error generando voz con Edge TTS: {e}")
         # Crear un audio mudo de respaldo
         os.system(f"ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 1 -q:a 9 -acodec libmp3lame {ruta_salida} -y")
-        return False
+        return []
 
 
-# Función síncrona para llamar desde el código principal
+# Función síncrona para llamar desde el código principal.
+# Devuelve la lista de word_boundaries para construir subtítulos.
 def generar_voz(texto, ruta_salida):
-    asyncio.run(generar_voz_edge(texto, ruta_salida))
+    return asyncio.run(generar_voz_edge(texto, ruta_salida))
+
+
+def agrupar_en_frases(word_boundaries, palabras_por_frase=7):
+    """
+    Agrupa los word_boundaries (palabra por palabra) en bloques de N palabras
+    para mostrar como subtítulo estilo clásico (frase completa abajo).
+    Devuelve una lista de dicts: {"texto": ..., "inicio": ..., "fin": ...}
+    """
+    frases = []
+    bloque = []
+    for wb in word_boundaries:
+        bloque.append(wb)
+        if len(bloque) >= palabras_por_frase:
+            frases.append({
+                "texto": " ".join(w["texto"] for w in bloque),
+                "inicio": bloque[0]["inicio"],
+                "fin": bloque[-1]["fin"]
+            })
+            bloque = []
+    if bloque:
+        frases.append({
+            "texto": " ".join(w["texto"] for w in bloque),
+            "inicio": bloque[0]["inicio"],
+            "fin": bloque[-1]["fin"]
+        })
+    return frases
 
 # ------------------------------------------------------------
 # 7. IA: GUION Y METADATOS CON ZHIPU (GLM-4)
@@ -470,7 +605,10 @@ def generar_imagen_zhipu(prompt, ruta_salida):
     payload = {
         "model": ZHIPU_IMAGE_MODEL,
         "prompt": prompt,
-        "size": "1080x1920"  # Formato vertical 9:16 nativo para Shorts/Reels
+        # CogView exige que ancho y alto sean múltiplos de 16 (1080 no lo es).
+        # Usamos 1072x1904 (el 9:16 más grande válido) y luego reescalamos
+        # a 1080x1920 al guardar la imagen.
+        "size": "1072x1904"
     }
 
     for intento in range(3):
@@ -533,7 +671,7 @@ def crear_short(guion, referencia, carpeta):
 
     audio_unico_path = os.path.join(carpeta, "audio_unico.mp3")
     print("  🎙️ Generando audio único completo...")
-    generar_voz(texto_completo_audio, audio_unico_path)
+    word_boundaries = generar_voz(texto_completo_audio, audio_unico_path)
 
     if not os.path.exists(audio_unico_path):
         raise RuntimeError("No se pudo generar el audio único")
@@ -542,6 +680,10 @@ def crear_short(guion, referencia, carpeta):
     duracion_total_audio = audio_unico.duration
     if duracion_total_audio <= 0:
         raise RuntimeError("Duración de audio inválida")
+
+    # Agrupar las palabras (con sus tiempos reales del TTS) en frases cortas
+    # para mostrarlas como subtítulos sincronizados.
+    frases_subtitulo = agrupar_en_frases(word_boundaries, palabras_por_frase=7) if word_boundaries else []
 
     num_segmentos = len(segmentos_visuales)
     duracion_por_imagen = duracion_total_audio / max(num_segmentos, 1)
@@ -576,6 +718,20 @@ def crear_short(guion, referencia, carpeta):
         faltante = duracion_total_audio - video_principal.duration
         ultimo_frame = video_principal.to_ImageClip(t=video_principal.duration - 0.01).set_duration(faltante)
         video_principal = concatenate_videoclips([video_principal, ultimo_frame], method="compose").set_audio(audio_unico)
+
+    # --- Capa de texto: referencia del versículo (primeros segundos) + subtítulos ---
+    capas_overlay = [video_principal]
+
+    duracion_referencia = min(3.0, video_principal.duration)
+    clip_referencia = crear_clip_referencia(referencia, duracion=duracion_referencia)
+    clip_referencia = clip_referencia.set_start(0).set_position(("center", "center"))
+    capas_overlay.append(clip_referencia)
+
+    if frases_subtitulo:
+        capas_overlay.extend(crear_clips_subtitulos(frases_subtitulo))
+
+    video_principal = CompositeVideoClip(capas_overlay, size=(1080, 1920)).set_duration(video_principal.duration)
+    video_principal = video_principal.set_audio(audio_unico)
 
     outro = preparar_outro("9:16")
     duracion_outro = outro.duration if outro else 0.0
