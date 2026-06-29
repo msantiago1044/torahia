@@ -36,7 +36,7 @@ ZHIPU_API_KEY = creds.get("zhipu_api_key")
 if not ZHIPU_API_KEY:
     raise ValueError("❌ Falta la API key de Zhipu (zhipu_api_key) en credentials.json")
 
-ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
+ZHIPU_BASE_URL = "https://api.z.ai/api/paas/v4/"
 
 # Cliente compatible con OpenAI SDK para chat (guion + SEO)
 client_zhipu = OpenAI(api_key=ZHIPU_API_KEY, base_url=ZHIPU_BASE_URL)
@@ -47,7 +47,7 @@ ZHIPU_IMAGE_MODEL = "cogview-4-250304"  # Modelo de imágenes (CogView)
 
 # Endpoint directo de imágenes (la SDK de OpenAI no siempre expone bien
 # parámetros propios de Zhipu como "size", así que usamos requests directo)
-ZHIPU_IMAGES_URL = "https://open.bigmodel.cn/api/paas/v4/images/generations"
+ZHIPU_IMAGES_URL = "https://api.z.ai/api/paas/v4/images/generations"
 
 # ------------------------------------------------------------
 # 2. CONFIGURACIÓN GENERAL
@@ -219,6 +219,54 @@ def limpiar_titulo(texto):
     return limpio[:100] if limpio else "Torah Diaria"
 
 
+# Rutas conocidas de fuentes en negrita, en distintos sistemas. Se prueban
+# en orden hasta encontrar una que exista. Cubre Windows, Linux (Docker) y Mac.
+RUTAS_FUENTE_BOLD = [
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",  # Linux/Docker
+    "C:/Windows/Fonts/arialbd.ttf",                                   # Windows (Arial Bold)
+    "C:/Windows/Fonts/segoeuib.ttf",                                  # Windows (Segoe UI Bold)
+    "C:/Windows/Fonts/calibrib.ttf",                                  # Windows (Calibri Bold)
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",              # macOS
+]
+
+_fuente_valida_cache = {"ruta": None, "buscada": False}
+
+
+def obtener_fuente(fontsize):
+    """
+    Devuelve una fuente TrueType en negrita del tamaño pedido, probando
+    varias rutas conocidas según el sistema operativo. Si ninguna ruta
+    existe, usa la fuente por defecto de PIL pero pidiendo el tamaño
+    explícitamente (soportado en Pillow >= 10.1), para no terminar con
+    texto microscópico de tamaño fijo.
+    """
+    if not _fuente_valida_cache["buscada"]:
+        for ruta in RUTAS_FUENTE_BOLD:
+            if os.path.exists(ruta):
+                _fuente_valida_cache["ruta"] = ruta
+                break
+        _fuente_valida_cache["buscada"] = True
+        if _fuente_valida_cache["ruta"]:
+            print(f"  🔎 Fuente encontrada para textos del video: {_fuente_valida_cache['ruta']}")
+        else:
+            print("  ⚠️ No se encontró ninguna fuente TrueType conocida. Usando fuente por defecto de PIL.")
+
+    ruta = _fuente_valida_cache["ruta"]
+    if ruta:
+        try:
+            return PIL.ImageFont.truetype(ruta, fontsize)
+        except Exception:
+            pass
+
+    # Fallback final: fuente por defecto de PIL, pidiendo tamaño explícito
+    # (Pillow >= 10.1). En versiones más viejas el parámetro size se ignora
+    # y siempre se obtiene una fuente pequeña de tamaño fijo.
+    try:
+        return PIL.ImageFont.load_default(size=fontsize)
+    except TypeError:
+        return PIL.ImageFont.load_default()
+
+
 def acortar_para_thumbnail(titulo, max_chars=55):
     """
     Los títulos de SEO suelen ser largos (buenos para YouTube, malos para
@@ -300,13 +348,7 @@ def generar_miniatura(ruta_base, titulo, ruta_out, formato="16:9"):
         fnt = None
 
         while fontsize >= fontsize_minimo:
-            try:
-                fnt = PIL.ImageFont.truetype(
-                    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-                    fontsize
-                )
-            except Exception:
-                fnt = PIL.ImageFont.load_default()
+            fnt = obtener_fuente(fontsize)
 
             lineas = envolver_texto_por_ancho(draw, titulo, fnt, ancho_objetivo_px)
 
@@ -360,13 +402,7 @@ def crear_clip_texto_pil(texto, size, fontsize, color="white", color_borde="blac
 
     img = PIL.Image.new("RGBA", size, (0, 0, 0, 0))
     draw = PIL.ImageDraw.Draw(img)
-    try:
-        fnt = PIL.ImageFont.truetype(
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            fontsize
-        )
-    except Exception:
-        fnt = PIL.ImageFont.load_default()
+    fnt = obtener_fuente(fontsize)
 
     lineas = envolver_texto_por_ancho(draw, texto, fnt, ancho_max_px)
 
@@ -485,7 +521,7 @@ async def generar_voz_edge(texto, ruta_salida):
         for k, v in subs.items():
             texto = re.sub(rf'(?i)\b{k}\b', v, texto)
 
-        communicate = edge_tts.Communicate(texto, VOZ_NARRADOR)
+        communicate = edge_tts.Communicate(texto, VOZ_NARRADOR, boundary="WordBoundary")
         word_boundaries = []
 
         with open(ruta_salida, "wb") as audio_file:
@@ -724,7 +760,10 @@ def generar_imagen_zhipu(prompt, ruta_salida):
         "size": "1072x1904"
     }
 
-    for intento in range(3):
+    max_intentos = 5
+    espera_base = 20  # segundos
+
+    for intento in range(max_intentos):
         try:
             response = requests.post(
                 ZHIPU_IMAGES_URL, headers=headers, json=payload, timeout=120
@@ -758,8 +797,9 @@ def generar_imagen_zhipu(prompt, ruta_salida):
                 return True
 
             elif response.status_code == 429:
-                print(f"  ⏳ Límite de tasa alcanzado... esperando 15s (Intento {intento + 1})")
-                time.sleep(15)
+                espera = espera_base * (intento + 1)  # 20s, 40s, 60s, 80s, 100s
+                print(f"  ⏳ Límite de tasa alcanzado... esperando {espera}s (Intento {intento + 1}/{max_intentos})")
+                time.sleep(espera)
             else:
                 print(f"  ❌ Error Zhipu (Intento {intento + 1}): {response.status_code} - {response.text[:200]}")
                 time.sleep(5)
@@ -806,6 +846,11 @@ def crear_short(guion, referencia, carpeta):
     for i, seg in enumerate(segmentos_visuales):
         i_path = os.path.join(carpeta, f"img_{i}.jpg")
         prompt_visual = seg.get('prompt_visual', 'Epic biblical scene, cinematic realism, 8k')
+
+        if i > 0:
+            # Pequeña pausa entre cada solicitud de imagen para no saturar
+            # el límite de tasa (rate limit) de la cuenta de Zhipu.
+            time.sleep(5)
 
         exito = generar_imagen_zhipu(prompt_visual, i_path)  # Usando CogView (Zhipu)
         if not exito or not os.path.exists(i_path):

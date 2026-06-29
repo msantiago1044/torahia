@@ -2,6 +2,7 @@ credentials.json
 memoria_progreso.json
 PRODUCCION_TORAH/
 firebase/
+web/
 venv/
 __pycache__/
 *.pyc
